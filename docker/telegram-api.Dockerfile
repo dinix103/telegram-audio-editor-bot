@@ -8,7 +8,7 @@ RUN git clone --recursive https://github.com/tdlib/telegram-bot-api.git /src \
 RUN cmake -S /src -B /src/build -DCMAKE_BUILD_TYPE=Release \
     && cmake --build /src/build --target telegram-bot-api -j2
 FROM debian:bookworm-slim
-RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates libssl3 zlib1g curl \
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates libssl3 libstdc++6 zlib1g curl \
     && rm -rf /var/lib/apt/lists/* \
     && groupadd -g 10001 audioapp && useradd -u 10001 -g audioapp -m audioapp \
     && mkdir /telegram && chown 10001:10001 /telegram

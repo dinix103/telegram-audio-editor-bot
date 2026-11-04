@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import os
+import socket
 from contextlib import suppress
 
 from aiogram.types import FSInputFile
@@ -119,11 +120,11 @@ async def execute(store, bot, pool, settings, job, kind):
         else:
             await bot.send_document(job.chat_id, payload)
         result.unlink()
+    await asyncio.to_thread(remove_job, settings.jobs_dir, job.id)
+    await store.forget(job)
     await status(
         bot, job, "Готово. Рабочие файлы удалены. Отправьте новый файл для следующей операции."
     )
-    await asyncio.to_thread(remove_job, settings.jobs_dir, job.id)
-    await store.forget(job)
     await pool.execute(
         "INSERT INTO job_counts(outcome,total) VALUES('success',1) ON CONFLICT(day,outcome) DO UPDATE SET total=job_counts.total+1"
     )
@@ -136,7 +137,9 @@ async def main():
     store = Store(redis)
     bot = make_bot(settings)
     pool = await connect(settings.database_url.get_secret_value())
-    health = asyncio.create_task(heartbeat(redis, f"health:worker:{os.getpid()}"))
+    health = asyncio.create_task(
+        heartbeat(redis, f"health:worker:{socket.gethostname()}:{os.getpid()}")
+    )
     try:
         while True:
             item = await redis.blmove("queue", "processing", timeout=5, src="LEFT", dest="RIGHT")
