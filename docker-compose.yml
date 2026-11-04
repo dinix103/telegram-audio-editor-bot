@@ -1,0 +1,118 @@
+x-common: &common
+  build: .
+  env_file: .env
+  restart: unless-stopped
+  init: true
+  user: "10001:10001"
+  read_only: true
+  tmpfs:
+    - /tmp:size=128m,mode=1777
+  cap_drop: [ALL]
+  security_opt: [no-new-privileges:true]
+  networks: [backend]
+  volumes:
+    - jobs:/work
+    - telegram:/telegram:ro
+  logging: &logging
+    driver: json-file
+    options: {max-size: "10m", max-file: "3"}
+  depends_on:
+    redis: {condition: service_healthy}
+    postgres: {condition: service_healthy}
+    telegram-bot-api: {condition: service_healthy}
+
+services:
+  telegram-bot-api:
+    build:
+      context: .
+      dockerfile: docker/telegram-api.Dockerfile
+    environment:
+      TELEGRAM_API_ID: ${TELEGRAM_API_ID:?Set TELEGRAM_API_ID in .env}
+      TELEGRAM_API_HASH: ${TELEGRAM_API_HASH:?Set TELEGRAM_API_HASH in .env}
+    volumes: [telegram:/telegram]
+    networks: [backend, internet]
+    restart: unless-stopped
+    init: true
+    read_only: true
+    tmpfs: [/tmp:size=128m,mode=1777]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    mem_limit: 2g
+    cpus: 1.0
+    logging: *logging
+    healthcheck:
+      test: [CMD-SHELL, "curl -s -o /dev/null http://127.0.0.1:8081/"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+  bot:
+    <<: *common
+    command: [python, -m, audio_bot.bot]
+    mem_limit: 512m
+    cpus: 0.5
+    healthcheck:
+      test: [CMD, python, -m, audio_bot.health, bot]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+  audio-worker:
+    <<: *common
+    command: [python, -m, audio_bot.workers]
+    mem_limit: 2g
+    cpus: 2.0
+    pids_limit: 128
+    stop_grace_period: 40s
+    healthcheck:
+      test: [CMD, python, -m, audio_bot.health, worker]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+  cleanup-worker:
+    <<: *common
+    command: [python, -m, audio_bot.cleanup]
+    mem_limit: 256m
+    cpus: 0.25
+    healthcheck:
+      test: [CMD, python, -m, audio_bot.health, cleanup]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+  redis:
+    image: redis:7.4-alpine
+    command: [redis-server, --save, "", --appendonly, "no", --maxmemory, 256mb, --maxmemory-policy, noeviction]
+    networks: [backend]
+    restart: unless-stopped
+    mem_limit: 384m
+    cpus: 0.5
+    logging: *logging
+    healthcheck:
+      test: [CMD, redis-cli, ping]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: audio
+      POSTGRES_DB: audio
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+    volumes: [postgres:/var/lib/postgresql/data]
+    networks: [backend]
+    restart: unless-stopped
+    mem_limit: 512m
+    cpus: 0.5
+    logging: *logging
+    healthcheck:
+      test: [CMD-SHELL, "pg_isready -U audio -d audio"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+networks:
+  backend: {internal: true}
+  internet: {}
+volumes:
+  jobs: {}
+  telegram: {}
+  postgres: {}

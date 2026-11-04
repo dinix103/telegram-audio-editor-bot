@@ -1,0 +1,24 @@
+name: Tests
+on: [push, pull_request]
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: sudo apt-get update && sudo apt-get install -y ffmpeg
+      - run: pip install -r requirements.lock && pip install -e '.[test]'
+      - run: ruff check .
+      - run: pytest -q
+      - name: Validate compose
+        run: |
+          cp .env.example .env
+          TELEGRAM_API_ID=12345 TELEGRAM_API_HASH=test docker compose config --quiet
+      - name: Build application container
+        run: docker build -t audio-editor-test .
+      - name: Import application in container
+        run: docker run --rm audio-editor-test python -c 'import audio_bot.bot, audio_bot.workers, audio_bot.cleanup'

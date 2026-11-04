@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "telegram-audio-editor-bot"
+version = "0.1.0"
+description = "Приватный аудиоредактор для Telegram с локальным Bot API"
+requires-python = ">=3.12"
+dependencies = ["aiogram>=3.20,<4", "redis>=5,<9", "asyncpg>=0.30,<1", "mutagen>=1.47,<2", "Pillow>=11,<14", "pydantic-settings>=2.7,<3"]
+
+[project.optional-dependencies]
+test = ["pytest>=8", "pytest-asyncio>=0.25", "ruff>=0.9", "fakeredis[lua]>=2.28", "PyYAML>=6"]
+
+[tool.setuptools.packages.find]
+include = ["audio_bot*"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I"]
+

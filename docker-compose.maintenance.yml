@@ -1,0 +1,12 @@
+services:
+  api-cache-maintenance:
+    build: .
+    profiles: [maintenance]
+    user: "10001:10001"
+    entrypoint: [python, /app/tools/purge_api_cache.py]
+    volumes:
+      - telegram:/telegram
+    networks: [backend]
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
