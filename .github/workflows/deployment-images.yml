@@ -1,0 +1,30 @@
+name: Deployment images
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths: [.github/workflows/deployment-images.yml]
+permissions:
+  contents: write
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build application and official Bot API
+        run: |
+          docker build -t audio-editor:deploy .
+          docker build -f docker/telegram-api.Dockerfile -t audio-editor-bot-api:deploy .
+          docker run --rm audio-editor:deploy python -c 'import audio_bot.bot, audio_bot.workers'
+          docker run --rm --entrypoint telegram-bot-api audio-editor-bot-api:deploy --help
+      - name: Package images
+        run: |
+          docker save audio-editor:deploy audio-editor-bot-api:deploy | gzip -1 > audio-editor-images.tar.gz
+          sha256sum audio-editor-images.tar.gz > SHA256SUMS
+      - name: Publish deployment prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "deploy-${GITHUB_SHA:0:7}" audio-editor-images.tar.gz SHA256SUMS \
+            --target "$GITHUB_SHA" --prerelease --title "Deployment images ${GITHUB_SHA:0:7}" \
+            --notes "Linux amd64 deployment images built from this commit. Official Bot API source is pinned in docker/telegram-api.Dockerfile. No environment secrets are included. This is a deployment prerelease, not completed Telegram acceptance testing."
