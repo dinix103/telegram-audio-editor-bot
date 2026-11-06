@@ -133,7 +133,8 @@ async def execute(store, bot, pool, settings, job, kind):
 async def main():
     settings = Settings()
     settings.jobs_dir.mkdir(parents=True, exist_ok=True)
-    redis = Redis.from_url(settings.redis_url)
+    # The socket deadline must exceed BLMOVE's five-second idle wait.
+    redis = Redis.from_url(settings.redis_url, socket_timeout=15)
     store = Store(redis)
     bot = make_bot(settings)
     pool = await connect(settings.database_url.get_secret_value())
