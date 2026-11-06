@@ -4,7 +4,6 @@ import sys
 from redis.asyncio import Redis
 
 from .config import Settings
-from .telegram import make_bot
 
 
 async def main():
@@ -14,6 +13,8 @@ async def main():
         await redis.ping()
         mode = sys.argv[1]
         if mode == "bot":
+            from .telegram import make_bot
+
             bot = make_bot(settings)
             try:
                 await bot.get_me()
