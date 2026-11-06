@@ -59,7 +59,9 @@ async def convert(
             raise UserError("Превышена дисковая квота задачи.")
         space_check(directory, 0, settings.disk_reserve_bytes)
 
-    unchanged = target == job.info["format"] and not effects and not edits.bitrate
+    unchanged = (
+        target == job.info["format"] and not effects and not edits.bitrate and edits.preserve_tags
+    )
     if unchanged:
         await asyncio.to_thread(shutil.copyfile, source, result)
     else:

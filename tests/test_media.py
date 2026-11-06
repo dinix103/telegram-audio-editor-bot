@@ -12,6 +12,7 @@ from audio_bot.services.files import UserError
 from audio_bot.services.metadata import cover_bytes, read_tags, write_metadata
 from audio_bot.services.probe import probe
 from audio_bot.services.process import run
+from audio_bot.ui import mp3_edits
 
 
 async def not_cancelled():
@@ -76,6 +77,26 @@ async def test_real_conversions(settings, tmp_path, source, target):
     info = await probe(output, settings.ffprobe)
     assert info["format"] == target
     assert 1.8 < info["duration"] < 2.3
+
+
+@pytest.mark.parametrize(
+    "source", ["mp3", "m4a", "flac", "wav", "aac", "aiff", "ogg", "opus", "wma"]
+)
+async def test_user_output_is_mp3_for_every_input(settings, tmp_path, source):
+    job, directory = await create_job(settings, tmp_path, source, mp3_edits({}))
+    output = await convert(job, directory, settings, not_cancelled)
+    assert output.suffix == ".mp3"
+    assert (await probe(output, settings.ffprobe))["codec"] == "mp3"
+
+
+async def test_disabling_source_tags_removes_them_from_mp3(settings, tmp_path):
+    job, directory = await create_job(settings, tmp_path, "mp3")
+    write_metadata(directory / "source", {"title": "Source title", "artist": "Source artist"})
+    job.edits = mp3_edits({"preserve_tags": False, "tags": {"title": "New title"}})
+    output = await convert(job, directory, settings, not_cancelled)
+    tags = read_tags(output)
+    assert tags["title"] == "New title"
+    assert not tags.get("artist")
 
 
 @pytest.mark.parametrize("fmt", ["mp3", "m4a", "flac", "ogg", "opus", "wav", "aiff"])

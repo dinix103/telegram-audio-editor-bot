@@ -1,3 +1,4 @@
+import json
 from datetime import datetime, timezone
 from unittest.mock import AsyncMock
 
@@ -101,6 +102,17 @@ async def test_private_editor_and_duplicate_confirmation(settings, tmp_path):
 
     try:
         await message("/start")
+        assert any(c.__api_method__ == "sendAnimation" for c in session.calls)
+        await message("/settings")
+        await callback("settings:bitrate_256")
+        settings_call = session.calls[-1]
+        assert "256 кбит/с" in settings_call.text
+        assert any(
+            b.text.startswith("✓") and b.callback_data == "settings:bitrate_256"
+            for row in settings_call.reply_markup.inline_keyboard
+            for b in row
+        )
+        pool.fetchval.return_value = json.dumps({"target": "wav", "delivery": "voice"})
         await message(
             document=Document(
                 file_id="file",
@@ -111,11 +123,16 @@ async def test_private_editor_and_duplicate_confirmation(settings, tmp_path):
         )
         job = await store.current(10)
         assert job and job.status == "queued"
+        assert job.edits.target == "mp3" and job.edits.delivery == "auto"
         await redis.lpop("queue")
         await execute(store, bot, pool, settings, job, "analyze")
         await callback(f"{job.id}:tag_title")
         await message("Новая композиция")
         assert (await store.current(10)).edits.tags["title"] == "Новая композиция"
+        await callback(f"{job.id}:normalize")
+        assert "Нормализация:</b> Включено" in session.calls[-1].text
+        await callback(f"{job.id}:speed_1.25")
+        assert "1.25×" in session.calls[-1].text
         stranger = User(id=20, is_bot=False, first_name="Other")
         await callback(f"{job.id}:save", stranger)
         assert await redis.llen("queue") == 0

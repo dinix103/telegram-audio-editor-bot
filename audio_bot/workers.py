@@ -2,14 +2,16 @@ import asyncio
 import logging
 import os
 import socket
+import time
 from contextlib import suppress
+from html import escape
 
 from aiogram.types import FSInputFile
 from redis.asyncio import Redis
 
 from .config import Settings
 from .database import connect
-from .keyboards import card, menu
+from .keyboards import card, main_menu, menu
 from .services.converter import convert
 from .services.covers import normalize_cover
 from .services.files import UserError, job_dir, remove_job, safe_name
@@ -18,6 +20,7 @@ from .services.metadata import cover_bytes, read_tags
 from .services.probe import probe
 from .store import Store
 from .telegram import make_bot
+from .ui import mp3_edits, progress_text
 
 log = logging.getLogger("audio-worker")
 
@@ -25,8 +28,35 @@ log = logging.getLogger("audio-worker")
 async def status(bot, job, text, markup=None):
     with suppress(Exception):
         await bot.edit_message_text(
-            text, chat_id=job.chat_id, message_id=job.status_message_id, reply_markup=markup
+            text,
+            chat_id=job.chat_id,
+            message_id=job.status_message_id,
+            reply_markup=markup,
+            parse_mode="HTML",
         )
+
+
+async def animated(bot, job, title, operation):
+    """Animate activity, without presenting invented conversion percentages."""
+    started = time.monotonic()
+    await status(bot, job, progress_text(title))
+
+    async def tick():
+        frame = 0
+        while True:
+            with suppress(Exception):
+                await bot.send_chat_action(job.chat_id, "upload_audio")
+            await asyncio.sleep(5)
+            frame += 1
+            await status(bot, job, progress_text(title, frame, time.monotonic() - started))
+
+    task = asyncio.create_task(tick())
+    try:
+        return await operation
+    finally:
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
 
 
 async def heartbeat(redis, key):
@@ -36,6 +66,8 @@ async def heartbeat(redis, key):
 
 
 async def execute(store, bot, pool, settings, job, kind):
+    # Enforce the product policy even for queued jobs/settings from older releases.
+    job.edits = mp3_edits(job.edits)
     directory = job_dir(settings.jobs_dir, job.id)
     if await store.cancelled(job.id):
         raise UserError("Операция отменена.")
@@ -46,7 +78,12 @@ async def execute(store, bot, pool, settings, job, kind):
         if job.mode != "single":
             for item in job.items:
                 if "info" not in item:
-                    item["info"] = await probe(directory / item["source"], settings.ffprobe)
+                    item["info"] = await animated(
+                        bot,
+                        job,
+                        "Анализируем аудио",
+                        probe(directory / item["source"], settings.ffprobe),
+                    )
                     item["info"]["tags"] = await asyncio.to_thread(
                         read_tags, directory / item["source"]
                     )
@@ -54,7 +91,12 @@ async def execute(store, bot, pool, settings, job, kind):
             if job.mode == "merge":
                 job.info["duration"] = sum(item["info"]["duration"] for item in job.items)
         else:
-            job.info = await probe(directory / "source", settings.ffprobe)
+            job.info = await animated(
+                bot,
+                job,
+                "Анализируем аудио",
+                probe(directory / "source", settings.ffprobe),
+            )
             job.info["tags"] = await asyncio.to_thread(read_tags, directory / "source")
         picture = await asyncio.to_thread(cover_bytes, directory / "source")
         if picture:
@@ -74,7 +116,12 @@ async def execute(store, bot, pool, settings, job, kind):
     await status(bot, job, "Обработка… /cancel — отменить")
     source_name = "source"
     if job.mode == "merge":
-        merged = await merge(job, directory, settings, lambda: store.cancelled(job.id))
+        merged = await animated(
+            bot,
+            job,
+            "Объединяем дорожки",
+            merge(job, directory, settings, lambda: store.cancelled(job.id)),
+        )
         source_name = merged.name
         original_format = job.info["format"]
         original_tags = job.info.get("tags", {})
@@ -95,13 +142,18 @@ async def execute(store, bot, pool, settings, job, kind):
         job.status = "processing"
         await store.save(job)
         await status(bot, job, f"Обработка {index + 1}/{len(items)}… /cancel — отменить")
-        result = await convert(
+        result = await animated(
+            bot,
             job,
-            directory,
-            settings,
-            lambda: store.cancelled(job.id),
-            item["source"],
-            f"result_{index}",
+            f"Создаём MP3 · {index + 1} из {len(items)}",
+            convert(
+                job,
+                directory,
+                settings,
+                lambda: store.cancelled(job.id),
+                item["source"],
+                f"result_{index}",
+            ),
         )
         if await store.cancelled(job.id):
             raise UserError("Операция отменена.")
@@ -113,17 +165,20 @@ async def execute(store, bot, pool, settings, job, kind):
             result, filename=safe_name(job.edits.filename) + suffix + result.suffix
         )
         delivery = job.edits.delivery
-        if delivery == "voice":
-            await bot.send_voice(job.chat_id, payload)
-        elif delivery != "document" and result.suffix in {".mp3", ".m4a"}:
-            await bot.send_audio(job.chat_id, payload)
+        caption = "🎧 <b>Готово · ваш MP3</b>\nТеги и выбранные настройки применены."
+        if delivery != "document":
+            await bot.send_audio(job.chat_id, payload, caption=caption, parse_mode="HTML")
         else:
-            await bot.send_document(job.chat_id, payload)
+            await bot.send_document(job.chat_id, payload, caption=caption, parse_mode="HTML")
         result.unlink()
     await asyncio.to_thread(remove_job, settings.jobs_dir, job.id)
     await store.forget(job)
     await status(
-        bot, job, "Готово. Рабочие файлы удалены. Отправьте новый файл для следующей операции."
+        bot,
+        job,
+        "✅ <b>MP3 отправлен</b>\n\nРабочие файлы удалены.\n"
+        "Отправьте следующий трек или выберите действие ниже.",
+        main_menu(),
     )
     await pool.execute(
         "INSERT INTO job_counts(outcome,total) VALUES('success',1) ON CONFLICT(day,outcome) DO UPDATE SET total=job_counts.total+1"
@@ -175,7 +230,7 @@ async def main():
                         if isinstance(exc, UserError)
                         else "Не удалось завершить задачу. Отправьте файл повторно."
                     )
-                    await status(bot, job, message)
+                    await status(bot, job, escape(message))
                     await asyncio.to_thread(remove_job, settings.jobs_dir, job.id)
                     await store.forget(job)
                     await pool.execute(

@@ -4,17 +4,29 @@ import shutil
 import time
 import uuid
 from contextlib import suppress
+from html import escape
+from pathlib import Path
 
 from aiogram import BaseMiddleware, Dispatcher, F, Router
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.storage.redis import RedisEventIsolation, RedisStorage
-from aiogram.types import CallbackQuery, FSInputFile, Message
+from aiogram.types import BotCommand, CallbackQuery, FSInputFile, Message
 from redis.asyncio import Redis
 
 from .config import Settings
 from .database import connect, preferences, set_preferences
-from .keyboards import FIELDS, back, card, keyboard, main_menu, menu
+from .keyboards import (
+    FIELDS,
+    back,
+    card,
+    effects_keyboard,
+    keyboard,
+    main_menu,
+    menu,
+    quality_rows,
+    settings_keyboard,
+)
 from .models import Edits, Job
 from .services.audio import filters, timestamp
 from .services.covers import normalize_cover
@@ -22,14 +34,21 @@ from .services.files import UserError, job_dir, local_input, remove_job, safe_na
 from .states import Editor
 from .store import Store
 from .telegram import make_bot
+from .ui import effects_text, mp3_edits, quality, settings_text, summary_text
 
 router = Router()
 log = logging.getLogger("audio-bot")
 HELP = (
-    "🎵 Аудиоредактор\n\nОтправьте музыку, голосовое сообщение или аудиофайл документом. "
-    "Выберите действия и нажмите «Сохранить».\n\n"
-    "/settings — настройки\n/merge — объединение\n/batch — пакетная обработка\n/order — порядок файлов\n/cancel — отмена\n/delete — удалить рабочие данные\n"
-    "/privacy — приватность\n/help — помощь"
+    "🎧 <b>AUDIX · ваша аудиостудия</b>\n"
+    "<i>Любой поддерживаемый аудиофайл → MP3</i>\n\n"
+    "<b>1.</b> Отправьте музыку, голосовое или документ.\n"
+    "<b>2.</b> Измените теги, обложку или звучание.\n"
+    "<b>3.</b> Нажмите «Сохранить в MP3» — получите готовый трек.\n\n"
+    "🎚 Качество · ✂️ Обрезка · 🔊 Громкость · ⏩ Скорость\n\n"
+    "/settings — настройки следующих файлов\n"
+    "/merge — объединить · /batch — обработать несколько\n"
+    "/order — порядок · /cancel — отменить\n"
+    "/delete — удалить рабочие данные · /privacy — приватность"
 )
 PRIVACY = (
     "Аудио временно обрабатывается на нашем сервере без сторонних сервисов обработки. "
@@ -60,7 +79,7 @@ class Guard(BaseMiddleware):
         except Exception as exc:
             log.warning("handler error=%s", type(exc).__name__)
             await message.answer(
-                str(exc)
+                escape(str(exc))
                 if isinstance(exc, UserError)
                 else "Не удалось выполнить действие. Попробуйте ещё раз или /cancel."
             )
@@ -72,7 +91,15 @@ class Guard(BaseMiddleware):
 
 @router.message(Command("start", "help"))
 async def start(message: Message):
-    await message.answer(HELP, reply_markup=main_menu())
+    animation = Path("assets/studio.mp4")
+    if message.text.split()[0].split("@")[0] == "/start" and animation.is_file():
+        await message.answer_animation(
+            FSInputFile(animation),
+            caption=HELP,
+            reply_markup=main_menu(),
+        )
+    else:
+        await message.answer(HELP, reply_markup=main_menu())
 
 
 @router.message(Command("privacy"))
@@ -110,69 +137,72 @@ async def cancel(message: Message, state: FSMContext, store, settings, pool):
 
 @router.message(Command("settings"))
 async def settings_menu(message: Message, pool, user_id=None):
-    current = await preferences(pool, user_id or message.from_user.id)
+    current = mp3_edits(await preferences(pool, user_id or message.from_user.id))
     await message.answer(
-        "⚙️ Настройки по умолчанию\n" + str(current),
-        reply_markup=keyboard(
-            "settings",
-            [
-                [("MP3", "target_mp3"), ("M4A", "target_m4a"), ("Исходный", "target_none")],
-                [
-                    ("128", "bitrate_128"),
-                    ("192", "bitrate_192"),
-                    ("320", "bitrate_320"),
-                    ("Авто", "bitrate_0"),
-                ],
-                [
-                    ("Музыка", "delivery_auto"),
-                    ("Файл", "delivery_document"),
-                    ("Голос", "delivery_voice"),
-                ],
-                [
-                    ("Переносить теги", "preserve_tags_true"),
-                    ("Не переносить", "preserve_tags_false"),
-                ],
-                [
-                    ("Пропускать несовместимую обложку", "incompatible_cover_drop"),
-                    ("Остановить", "incompatible_cover_error"),
-                ],
-                [("Подтверждать", "confirm_true"), ("Без подтверждения", "confirm_false")],
-            ],
-        ),
+        settings_text(current),
+        reply_markup=settings_keyboard(current),
     )
 
 
 @router.callback_query(F.data.startswith("settings:"))
 async def setting_callback(callback: CallbackQuery, pool):
-    key, value = callback.data.split(":", 1)[1].rsplit("_", 1)
-    if key not in {
-        "target",
-        "bitrate",
-        "delivery",
-        "preserve_tags",
-        "incompatible_cover",
-        "confirm",
-    }:
+    action = callback.data.split(":", 1)[1]
+    if action == "home":
+        await callback.answer()
+        await callback.message.edit_text(HELP, reply_markup=main_menu())
         return
-    current = await preferences(pool, callback.from_user.id)
-    current[key] = int(value) if key == "bitrate" else None if value == "none" else value
-    if key in {"preserve_tags", "confirm"}:
-        current[key] = value == "true"
-    validated = Edits.model_validate(current)
-    await set_preferences(pool, callback.from_user.id, {k: getattr(validated, k) for k in current})
-    await callback.answer("Сохранено")
+    current = mp3_edits(await preferences(pool, callback.from_user.id)).model_dump()
+    if action in {"toggle_tags", "toggle_confirm"}:
+        key = "preserve_tags" if action == "toggle_tags" else "confirm"
+        current[key] = not current[key]
+    else:
+        key, value = action.rsplit("_", 1)
+        if key not in {
+            "target",
+            "bitrate",
+            "delivery",
+            "preserve_tags",
+            "incompatible_cover",
+            "confirm",
+        }:
+            await callback.answer()
+            return
+        current[key] = int(value) if key == "bitrate" else None if value == "none" else value
+        if key in {"preserve_tags", "confirm"}:
+            current[key] = value == "true"
+    validated = mp3_edits(current)
+    await set_preferences(pool, callback.from_user.id, validated.model_dump())
+    await callback.answer("✓ Настройки сохранены")
+    with suppress(Exception):
+        await callback.message.edit_text(
+            settings_text(validated),
+            reply_markup=settings_keyboard(validated),
+        )
 
 
 @router.callback_query(F.data.startswith("home:"))
-async def home_callback(callback: CallbackQuery, pool):
+async def home_callback(callback: CallbackQuery, pool, store, state):
     await callback.answer()
     if callback.data == "home:settings":
         await settings_menu(callback.message, pool, callback.from_user.id)
     elif callback.data == "home:help":
         await callback.message.answer(HELP, reply_markup=main_menu())
+    elif callback.data in {"home:merge", "home:batch"}:
+        if await store.current(callback.from_user.id):
+            raise UserError("Сначала сохраните текущий трек или нажмите /cancel.")
+        await state.clear()
+        mode = callback.data.split(":")[1]
+        await store.redis.set(f"mode:{callback.from_user.id}", mode, ex=900)
+        await callback.message.answer(
+            f"📚 <b>{'Объединяем в один MP3' if mode == 'merge' else 'Обрабатываем несколько MP3'}</b>\n\n"
+            "Отправляйте до 10 файлов по одному. Дождитесь анализа каждого, "
+            "затем нажмите «Сохранить в MP3».\n\n/order — изменить порядок · /cancel — отменить"
+        )
     else:
         await callback.message.answer(
-            "Отправьте аудиофайл — после анализа откроется меню всех действий."
+            "📥 <b>Отправьте аудио</b>\n\n"
+            "Подойдёт музыка, голосовое сообщение или файл документом. "
+            "После анализа откроется студия с настройками. Результат — MP3."
         )
 
 
@@ -254,6 +284,7 @@ async def action(callback: CallbackQuery, state: FSMContext, store, settings):
         await callback.message.edit_text("Операция отменена.")
         return
     job = await editable(store, callback.from_user.id, job_id)
+    job.edits = mp3_edits(job.edits)
     if action == "summary" and not job.edits.confirm:
         action = "save"
     await state.clear()
@@ -270,13 +301,13 @@ async def action(callback: CallbackQuery, state: FSMContext, store, settings):
         }.get(field, f"Введите: {FIELDS.get(field, field)}. Знак - удаляет значение.")
         markup = back(job.id)
     elif action == "tags":
-        text = "Выберите поле"
+        text = "🏷 <b>Теги вашего трека</b>\n\nВыберите поле, которое хотите изменить."
         markup = keyboard(
             job.id,
             [[(name, f"tag_{field}")] for field, name in FIELDS.items()] + [[("⬅️ Назад", "menu")]],
         )
     elif action == "covers":
-        text = "🖼 Обложка будет встроена в файл при сохранении."
+        text = "🖼 <b>Обложка MP3</b>\n\nЗагрузите изображение — оно будет встроено в трек. Можно также сохранить текущую обложку отдельно."
         markup = keyboard(
             job.id,
             [
@@ -300,77 +331,61 @@ async def action(callback: CallbackQuery, state: FSMContext, store, settings):
             raise UserError("Обложки нет.")
         await callback.message.answer_document(FSInputFile(picture, filename="cover.jpg"))
     elif action == "formats":
-        text = "Выберите формат. Перекодирование в сжатый формат может снизить качество. Увеличение битрейта не восстанавливает детали."
-        markup = keyboard(
-            job.id,
-            [
-                [(f.upper(), f"format_{f}") for f in row]
-                for row in [("mp3", "m4a", "opus"), ("ogg", "wav", "flac"), ("aac", "aiff", "wma")]
-            ]
-            + [[("⬅️ Назад", "menu")]],
-        )
+        text = "🎵 <b>Результат всегда в MP3</b>\n\nВыберите качество или сразу сохраните трек."
+        markup = keyboard(job.id, quality_rows(job.edits) + [[("⬅️ К треку", "menu")]])
     elif action.startswith("format_"):
-        job.edits = Edits.model_validate({**job.edits.model_dump(), "target": action[7:]})
-        text = f"Выбран {job.edits.target.upper()}. WAV/AIFF могут сильно увеличить размер. AAC/WMA: перенос тегов и обложек не поддерживается."
+        text = "🎵 <b>Выбран MP3</b>\n\nВсе результаты теперь сохраняются в этом формате."
     elif action == "quality":
-        text = "Качество MP3. Авто сохраняет поток, когда возможно; при перекодировании — VBR."
+        text = (
+            "🎚 <b>Качество MP3</b>\n\n"
+            f"Сейчас: <b>{quality(job.edits.bitrate)}</b>\n\n"
+            "Авто — без лишнего перекодирования MP3; для других форматов — переменный битрейт.\n"
+            "128 — компактно · 192 — баланс · 256/320 — больше размер.\n\n"
+            "<i>Повышение битрейта не восстанавливает потерянные детали.</i>"
+        )
         markup = keyboard(
             job.id,
-            [
-                [(str(v) if v else "Авто", f"bitrate_{v}") for v in [0, 128, 192, 256, 320]],
-                [("⬅️ Назад", "menu")],
-            ],
+            quality_rows(job.edits) + [[("⬅️ К треку", "menu")]],
         )
     elif action.startswith("bitrate_"):
         job.edits = Edits.model_validate({**job.edits.model_dump(), "bitrate": int(action[8:])})
+        text = card(job)
     elif action == "delivery":
-        text = "MP3/M4A можно отправить музыкой. Голосовое будет преобразовано в Opus."
+        text = "📤 <b>Как отправить MP3?</b>\n\nМузыка — встроенный плеер Telegram. Документ — обычный файл .mp3. Формат и качество одинаковые."
         markup = keyboard(
             job.id,
             [
                 [
-                    ("Музыка / авто", "send_auto"),
-                    ("Файл", "send_document"),
-                    ("Голос", "send_voice"),
+                    ("🎵 Музыка", "send_auto"),
+                    ("📎 Документ", "send_document"),
                 ],
                 [("⬅️ Назад", "menu")],
             ],
         )
     elif action.startswith("send_"):
-        job.edits = Edits.model_validate({**job.edits.model_dump(), "delivery": action[5:]})
+        job.edits = mp3_edits({**job.edits.model_dump(), "delivery": action[5:]})
+        text = card(job)
     elif action == "effects":
-        text = "Обработка требует перекодирования. Скорость меняется с сохранением высоты тона."
-        markup = keyboard(
-            job.id,
-            [
-                [("✂️ Обрезка", "trim"), ("🔊 Громкость", "volume")],
-                [("Нормализация вкл/выкл", "normalize"), ("Тишина вкл/выкл", "silence")],
-                [(str(v) + "×", f"speed_{v}") for v in [0.5, 0.75, 1, 1.25, 1.5, 2]],
-                [("⬅️ Назад", "menu")],
-            ],
-        )
+        text = effects_text(job.edits)
+        markup = effects_keyboard(job.id, job.edits)
     elif action.startswith("speed_"):
         job.edits = Edits.model_validate({**job.edits.model_dump(), "speed": float(action[6:])})
+        text, markup = effects_text(job.edits), effects_keyboard(job.id, job.edits)
     elif action in {"normalize", "silence"}:
         setattr(job.edits, action, not getattr(job.edits, action))
-        text = "Настройка изменена. Проверьте сводку перед сохранением."
+        text = effects_text(job.edits)
+        markup = effects_keyboard(job.id, job.edits)
     elif action == "summary":
-        text = "Сводка изменений:\n" + "\n".join(
-            f"{FIELDS.get(k, k)}: {v or 'удалить'}" for k, v in job.edits.tags.items()
+        text = summary_text(job, FIELDS)
+        markup = keyboard(
+            job.id, [[("✅ Получить MP3", "save")], [("⬅️ Изменить настройки", "menu")]]
         )
-        text += (
-            f"\nФормат: {job.edits.target or job.info['format']}\n"
-            f"MP3: {job.edits.bitrate or 'авто'}\nОбложка: {job.edits.cover}\n"
-            f"Обрезка: {job.edits.trim}\nСкорость: {job.edits.speed}×\n"
-            f"Громкость: {job.edits.volume} дБ\nНормализация: {job.edits.normalize}\n"
-            f"Удаление тишины: {job.edits.silence}\nОтправка: {job.edits.delivery}\n"
-            f"Имя: {job.edits.filename}\n\nПовышение битрейта не улучшает исходное качество."
-        )
-        markup = keyboard(job.id, [[("✅ Подтвердить", "save"), ("⬅️ Назад", "menu")]])
     elif action == "save":
         filters(job.edits, job.info["duration"])
         await store.enqueue(job, "render")
-        await callback.message.edit_text("Ожидание в очереди. /cancel — отменить")
+        await callback.message.edit_text(
+            "⏳ <b>Ваш MP3 в очереди</b>\n\nНачнём, как только освободится обработчик.\n/cancel — отменить"
+        )
         return
     await store.save(job)
     with suppress(Exception):
@@ -475,8 +490,8 @@ async def receive(message: Message, state: FSMContext, store, settings, pool):
         await message.answer("Файл добавлен. Ожидание анализа…")
         return
     identifier = uuid.uuid4().hex
-    defaults = Edits.model_validate(await preferences(pool, message.from_user.id))
-    notice = await message.answer("Файл получен. Подготовка…")
+    defaults = mp3_edits(await preferences(pool, message.from_user.id))
+    notice = await message.answer("📥 <b>Файл получен</b>\n\nПодготавливаю трек к анализу…")
     if not await store.redis.set(f"user:{message.from_user.id}", identifier, nx=True, ex=86400):
         raise UserError("У вас уже есть активная задача.")
     directory = job_dir(settings.jobs_dir, identifier)
@@ -537,6 +552,28 @@ async def main():
     router.callback_query.outer_middleware(Guard())
     dispatcher.include_router(router)
     try:
+        await bot.set_my_commands(
+            [
+                BotCommand(command="start", description="🎧 Открыть аудиостудию"),
+                BotCommand(command="settings", description="🎚 Качество и отправка MP3"),
+                BotCommand(command="merge", description="🔗 Объединить аудио в один MP3"),
+                BotCommand(command="batch", description="📚 Обработать несколько файлов"),
+                BotCommand(command="cancel", description="✕ Отменить текущую задачу"),
+                BotCommand(command="help", description="Как пользоваться студией"),
+                BotCommand(command="privacy", description="Приватность и хранение файлов"),
+                BotCommand(command="delete", description="Удалить рабочие данные и настройки"),
+            ]
+        )
+        await bot.set_my_short_description(
+            "🎧 AUDIX · Аудиостудия. Конвертация в MP3, теги, обложки и обработка звука."
+        )
+        await bot.set_my_description(
+            "🎧 Ваша аудиостудия в Telegram\n\n"
+            "Отправьте аудио или голосовое — получите MP3. "
+            "Меняйте название, исполнителя, обложку, громкость и скорость. "
+            "Обрезайте треки и объединяйте несколько записей.\n\n"
+            "Начните с /start · Качество и отправка: /settings"
+        )
         await dispatcher.start_polling(bot, allowed_updates=["message", "callback_query"])
     finally:
         await bot.session.close()

@@ -8,6 +8,7 @@ COPY pyproject.toml ./
 COPY requirements.lock ./
 COPY audio_bot ./audio_bot
 COPY migrations ./migrations
+COPY assets ./assets
 COPY tools/purge_api_cache.py ./tools/purge_api_cache.py
 RUN pip install --no-cache-dir -r requirements.lock && pip install --no-cache-dir --no-deps . \
     && mkdir -p /work/jobs && chown -R 10001:10001 /work
