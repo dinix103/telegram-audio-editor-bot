@@ -132,6 +132,19 @@ GitHub Actions устанавливает FFmpeg, запускает тесты 
 
 ## Обновление
 
+Для сервера, на котором не нужно компилировать образы, workflow `Deployment images`
+публикует готовые Linux amd64 образы в отдельном prerelease. Скачайте архив и `SHA256SUMS`
+из одного release, проверьте `sha256sum -c SHA256SUMS` и загрузите его через
+`docker load -i audio-editor-images.tar.gz`. Затем:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.prebuilt.yml up -d --no-build --pull never
+```
+
+Этот дополнительный Compose-файл меняет только имена образов. Лимиты файлов, CPU,
+RAM и остальные настройки остаются исходными. Новая версия приложения требует
+новой сборки deployment-образов, их загрузки и пересоздания контейнеров.
+
 ```bash
 # Сначала /admin pause и дождаться завершения задач
 git pull --ff-only

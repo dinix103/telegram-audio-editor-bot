@@ -1,0 +1,11 @@
+# Use locally loaded CI images without changing the standard resource/file limits.
+# docker compose -f docker-compose.yml -f docker-compose.prebuilt.yml up -d --no-build --pull never
+services:
+  telegram-bot-api:
+    image: audio-editor-bot-api:deploy
+  bot:
+    image: audio-editor:deploy
+  audio-worker:
+    image: audio-editor:deploy
+  cleanup-worker:
+    image: audio-editor:deploy
